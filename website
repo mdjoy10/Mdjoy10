@@ -1,86 +1,173 @@
-‎""" Sheba Finder Bot - MVP (Mobile-ready) Language: Python (python-telegram-bot v20+)
-‎
-‎Ready-to-deploy: Telegram bot + FastAPI webhook + polling fallback Supports:
-‎
-‎/start with language selection (Bangla/English)
-‎
-‎Find Service (location/text)
-‎
-‎Register as Provider flow
-‎
-‎Save providers to DB (SQLite by default)
-‎
-‎
-‎Environment variables required:
-‎
-‎BOT_TOKEN     -> Telegram bot token
-‎
-‎DATABASE_URL  -> optional (Postgres URL, default SQLite)
-‎
-‎PORT          -> server port (default 8080)
-‎
-‎WEBHOOK_URL   -> public HTTPS URL for Telegram webhook
-‎
-‎
-‎IMPORTANT: Do not commit BOT_TOKEN. Revoke old token and generate a new one. """
-‎
-‎import os import asyncio from typing import Optional, List from fastapi import FastAPI from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, ConversationHandler import logging
-‎
-‎Logging setup
-‎
-‎logging.basicConfig(level=logging.INFO) logger = logging.getLogger(name)
-‎
-‎ENV variables
-‎
-‎BOT_TOKEN = os.environ.get('BOT_TOKEN') PORT = int(os.environ.get('PORT', 8080)) WEBHOOK_URL = os.environ.get('WEBHOOK_URL') DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite+aiosqlite:///./data.db')
-‎
-‎if not BOT_TOKEN: logger.error("BOT_TOKEN is not set") raise SystemExit("BOT_TOKEN environment variable required")
-‎
-‎FastAPI app
-‎
-‎app = FastAPI()
-‎
-‎Telegram bot
-‎
-‎application = ApplicationBuilder().token(BOT_TOKEN).build()
-‎
-‎Conversation states
-‎
-‎LANG, MAIN_MENU, WAIT_LOCATION, REGISTER_NAME = range(4)
-‎
-‎Keyboards
-‎
-‎lang_kb = ReplyKeyboardMarkup([['বাংলা 🇧🇩', 'English 🇬🇧']], resize_keyboard=True, one_time_keyboard=True) main_kb_bangla = ReplyKeyboardMarkup([['সার্ভিস খুঁজুন 🔎','আমি সেবা দিই 📝'],['মাই ফেভারিট ⭐','হেল্প ❓']], resize_keyboard=True) main_kb_english = ReplyKeyboardMarkup([['Find Service 🔎','I provide service 📝'],['My Favorites ⭐','Help ❓']], resize_keyboard=True)
-‎
-‎Handlers
-‎
-‎async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("স্বাগতম! ভাষা নির্বাচন করুন:\nWelcome! Please choose a language:", reply_markup=lang_kb) return LANG
-‎
-‎async def lang_choice(update: Update, context: ContextTypes.DEFAULT_TYPE): text = update.message.text.strip() if 'বাংলা' in text: context.user_data['lang'] = 'bn' await update.message.reply_text('ভালো লাগলো! মেনু থেকে একটি অপশন বেছে নিন:', reply_markup=main_kb_bangla) else: context.user_data['lang'] = 'en' await update.message.reply_text('Nice! Choose an option from the menu:', reply_markup=main_kb_english) return MAIN_MENU
-‎
-‎async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE): text = update.message.text.strip() lang = context.user_data.get('lang', 'en') if 'সার্ভিস' in text or 'Find Service' in text: kb = ReplyKeyboardMarkup([[KeyboardButton(text="লোকেশন শেয়ার করুন", request_location=True)], ["লোকেশন টাইপ করে দিন"]], resize_keyboard=True, one_time_keyboard=True) if lang=='bn' else ReplyKeyboardMarkup([[KeyboardButton(text="Share location", request_location=True)], ["Type area name"]], resize_keyboard=True, one_time_keyboard=True) msg = 'লোকেশন শেয়ার করুন বা টাইপ করুন:' if lang=='bn' else 'Share your location or type area name:' await update.message.reply_text(msg, reply_markup=kb) return WAIT_LOCATION elif 'আমি সেবা' in text or 'I provide service' in text: msg = 'আপনার নাম লিখুন:' if lang=='bn' else 'Please send your name:' await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove()) return REGISTER_NAME else: msg = 'Coming soon...' if lang=='en' else 'শীঘ্রই আসছে...' await update.message.reply_text(msg) return MAIN_MENU
-‎
-‎Conversation handler
-‎
-‎conv_handler = ConversationHandler( entry_points=[CommandHandler('start', start)], states={ LANG: [MessageHandler(filters.TEXT & ~filters.COMMAND, lang_choice)], MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)] }, fallbacks=[CommandHandler('start', start)] )
-‎
-‎application.add_handler(conv_handler)
-‎
-‎FastAPI webhook
-‎
-‎@app.on_event("startup") async def on_startup(): await application.initialize() await application.start() if WEBHOOK_URL: await application.bot.set_webhook(WEBHOOK_URL)
-‎
-‎@app.on_event("shutdown") async def on_shutdown(): await application.stop() await application.shutdown()
-‎
-‎@app.post("/webhook") async def webhook(request: dict): update = Update.de_json(request, application.bot) await application.update_queue.put(update) return {'status': 'ok'}
-‎
-‎Local polling fallback (optional)
-‎
-‎if name == 'main': import uvicorn asyncio.run(init_db())  # create tables if DB exists uvicorn.run(app, host='0.0.0.0', port=PORT)
-‎python-telegram-bot[core,fastapi]==20.5
-‎fastapi
-‎uvicorn
-‎sqlalchemy[aio]
-‎aiosqlite
-‎python-dotenv
-‎
+‎import os
+import tempfile
+import asyncio
+import logging
+from threading import Thread
+from flask import Flask
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
+import yt_dlp
+from datetime import date
+
+# ================= CONFIG =================
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # ENV VARIABLE
+ADMIN_ID = 6449142120
+
+DAILY_LIMIT = 5
+PREMIUM_USERS = set()
+
+# ================= USER DATA =================
+user_download_count = {}
+user_last_date = {}
+user_language = {}
+
+# ================= LOG =================
+logging.basicConfig(level=logging.INFO)
+
+# ================= KEEP ALIVE =================
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "🚀 Premium Downloader Bot is alive and ready!"
+
+def run():
+    app.run(host="0.0.0.0", port=8080)
+
+def keep_alive():
+    Thread(target=run, daemon=True).start()
+
+# ================= START =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🌐 Language", callback_data="LANG")],
+        [InlineKeyboardButton("📢 Share Bot", switch_inline_query="Downloader Bot")]
+    ]
+    await update.message.reply_text(
+        "👋 Welcome to Premium Downloader Bot\n\n"
+        "🔗 Send any video link (YouTube / Shorts / TikTok / Instagram / Facebook)\n"
+        "🎥 Downloads in best available quality (HD/4K where available)\n"
+        "🎵 Audio extraction supported",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ================= CALLBACK =================
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "LANG":
+        await q.edit_message_text(
+            "Choose Language:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🇧🇩 বাংলা", callback_data="BN")],
+                [InlineKeyboardButton("🇺🇸 English", callback_data="EN")]
+            ])
+        )
+    elif q.data in ["BN", "EN"]:
+        user_language[q.from_user.id] = q.data
+        await q.edit_message_text("✅ Language Updated")
+
+# ================= ADMIN =================
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Not authorized")
+        return
+
+    await update.message.reply_text(
+        f"👥 Total Users: {len(user_download_count)}\n"
+        f"⭐ Premium Users: {len(PREMIUM_USERS)}"
+    )
+
+# ================= DOWNLOAD =================
+def download_media_sync(url):
+    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    temp.close()
+
+    ydl_opts = {
+        "outtmpl": temp.name,
+        "quiet": True,
+        "format": "bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "ignoreerrors": True,
+        "retries": 3,
+        "no_warnings": True,
+        "progress_hooks": []
+    }
+
+    # TikTok/Instagram/FB special handling
+    if "tiktok.com" in url or "instagram.com" in url or "fb.watch" in url:
+        ydl_opts["merge_output_format"] = "mp4"
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    if not os.path.exists(temp.name):
+        raise Exception("Download failed or video not available.")
+    return temp.name
+
+async def download_media(url):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, download_media_sync, url)
+
+# ================= MESSAGE HANDLER =================
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = (update.message.text or "").strip()
+
+    if not text.startswith("http"):
+        await update.message.reply_text("❌ Please send a valid video link")
+        return
+
+    today = date.today()
+    if uid not in user_last_date or user_last_date[uid] != today:
+        user_last_date[uid] = today
+        user_download_count[uid] = 0
+
+    if uid not in PREMIUM_USERS:
+        if user_download_count[uid] >= DAILY_LIMIT:
+            await update.message.reply_text(
+                "🚫 Daily limit reached\n⭐ Upgrade to Premium"
+            )
+            return
+        user_download_count[uid] += 1
+
+    msg = await update.message.reply_text("⏳ Downloading your video, please wait...")
+
+    try:
+        file_path = await download_media(text)
+        with open(file_path, "rb") as f:
+            await update.message.reply_video(
+                video=f,
+                caption="✅ Download Complete"
+            )
+        os.remove(file_path)
+        await msg.delete()
+
+    except Exception as e:
+        await msg.edit_text(f"❌ Failed to download video:\n{str(e)}")
+
+# ================= MAIN =================
+def main():
+    keep_alive()
+
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("stats", stats))
+    app_bot.add_handler(CallbackQueryHandler(callback))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+
+    print("🚀 Premium Downloader Bot Running")
+    app_bot.run_polling()
+
+if __name__ == "__main__":
+    main()
